@@ -1,26 +1,26 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Loader from '../components/Loader'
 import ProductCard from '../components/ProductCard'
 import ProxyPanel from '../components/ProxyPanel'
 import SearchBar from '../components/SearchBar'
 import Tabs from '../components/Tabs'
 import Toast from '../components/Toast'
+import { DEFAULT_SOURCE, SOURCES } from '../constants/sources'
 import { api } from '../services/api'
 
 const LAST_SEARCH_PAYLOAD_KEY = 'lastSearchPayload'
 const LAST_SEARCH_QUERY_KEY = 'lastSearchQuery'
 const LAST_ACTIVE_TAB_KEY = 'lastActiveTab'
-const SOURCES = ['kaspi', 'wildberries', 'ozon']
 const SORT_MODES = ['default', 'price_asc', 'price_desc']
 
-const createEmptyResults = () => ({ kaspi: [], wildberries: [], ozon: [] })
-const createEmptyCounts = () => ({ kaspi: 0, wildberries: 0, ozon: 0 })
-const createEmptySourceModes = () => ({ kaspi: 'server', wildberries: 'server', ozon: 'server' })
-const createEmptySourceMeta = () => ({
-  kaspi: { sellers: [], sellersFound: 0, sellersKnownItems: 0 },
-  wildberries: { sellers: [], sellersFound: 0, sellersKnownItems: 0 },
-  ozon: { sellers: [], sellersFound: 0, sellersKnownItems: 0 },
-})
+const createSourceMap = (valueFactory) => Object.fromEntries(SOURCES.map((source) => [source, valueFactory(source)]))
+const createEmptyResults = () => createSourceMap(() => [])
+const createEmptyCounts = () => createSourceMap(() => 0)
+const createEmptySourceModes = () => createSourceMap(() => 'server')
+const createEmptySourceMeta = () =>
+  createSourceMap(() => ({ sellers: [], sellersFound: 0, sellersKnownItems: 0 }))
+const createEmptySourcePriceStats = () => createSourceMap(() => null)
+const createEmptySourceSuppliers = () => createSourceMap(() => [])
 
 const normalizeResults = (raw) => {
   const normalized = createEmptyResults()
@@ -143,6 +143,108 @@ const parsePriceInfo = (rawPrice) => {
   }
 }
 
+const formatMoneyValue = (value, currency = '₸') => {
+  if (!Number.isFinite(value)) {
+    return null
+  }
+  return `${value.toLocaleString('ru')} ${currency || ''}`.trim()
+}
+
+const normalizeProductItem = (item, source) => {
+  if (!item || typeof item !== 'object') {
+    return null
+  }
+
+  const productUrl = item.product_url || item.url
+  if (!productUrl) {
+    return null
+  }
+
+  return {
+    ...item,
+    source: String(item.source || source).toLowerCase(),
+    product_url: productUrl,
+    image_url: item.image_url || item.image || null,
+  }
+}
+
+const normalizeSourceKey = (source, fallback = '') => String(source || fallback).toLowerCase()
+
+const firstSourceWithItems = (resultsBySource) => {
+  if (!resultsBySource || typeof resultsBySource !== 'object') {
+    return DEFAULT_SOURCE
+  }
+
+  return SOURCES.find((source) => resultsBySource[source]?.length > 0) || DEFAULT_SOURCE
+}
+
+const processSearchPayload = (payload) => {
+  const nextResults = createEmptyResults()
+  const nextCounts = createEmptyCounts()
+  const nextSourceMeta = createEmptySourceMeta()
+  const nextSourceModes = createEmptySourceModes()
+  const nextSourcePriceStats = createEmptySourcePriceStats()
+  const nextErrors = {}
+  const nextSuppliers = createEmptySourceSuppliers()
+
+  if (!payload || !Array.isArray(payload.results)) {
+    return {
+      nextResults,
+      nextCounts,
+      nextSourceMeta,
+      nextSourceModes,
+      nextSourcePriceStats,
+      nextErrors,
+      nextSuppliers,
+    }
+  }
+
+  payload.results.forEach((entry) => {
+    const source = normalizeSourceKey(entry?.source)
+    if (!source) {
+      return
+    }
+
+    const items = Array.isArray(entry.items)
+      ? entry.items.map((item) => normalizeProductItem(item, source)).filter(Boolean)
+      : []
+    const rawMeta = entry?.meta && typeof entry.meta === 'object' ? entry.meta : {}
+    const metaSellers = Array.isArray(rawMeta.sellers)
+      ? rawMeta.sellers.filter((value) => typeof value === 'string' && value.trim())
+      : []
+    const metaSellersFound = Number.isFinite(rawMeta.sellers_unique_count)
+      ? rawMeta.sellers_unique_count
+      : metaSellers.length
+    const metaSellersKnownItems = Number.isFinite(rawMeta.sellers_known_items)
+      ? rawMeta.sellers_known_items
+      : metaSellers.length
+
+    nextResults[source] = items.slice(0, 10)
+    nextCounts[source] = items.length
+    nextSourceMeta[source] = {
+      sellers: metaSellers,
+      sellersFound: metaSellersFound,
+      sellersKnownItems: metaSellersKnownItems,
+    }
+    nextSourceModes[source] = entry?.source_mode === 'client' ? 'client' : 'server'
+    nextSourcePriceStats[source] = entry.price_stats || null
+    nextSuppliers[source] = entry.suppliers || []
+    if (entry.error) {
+      nextErrors[source] = entry.error
+    }
+  })
+
+  return {
+    nextResults,
+    nextCounts,
+    nextSourceMeta,
+    nextSourceModes,
+    nextSourcePriceStats,
+    nextErrors,
+    nextSuppliers,
+  }
+}
+
 const buildExtremesByCurrency = (items) => {
   const buckets = {}
 
@@ -196,93 +298,88 @@ const readSessionString = (key, fallback = '') => {
 
 export default function SearchPage() {
   const restoredQuery = useMemo(() => readSessionString(LAST_SEARCH_QUERY_KEY), [])
-  const restoredActiveTab = useMemo(() => {
-    const savedTab = readSessionString(LAST_ACTIVE_TAB_KEY, 'kaspi')
-    return SOURCES.includes(savedTab) ? savedTab : 'kaspi'
-  }, [])
+  const didRestoreSession = useRef(false)
+  const didSkipInitialActiveSave = useRef(false)
 
   const [query, setQuery] = useState(restoredQuery)
-  const [activeTab, setActiveTab] = useState(restoredActiveTab)
+  const [activeTab, setActiveTab] = useState(DEFAULT_SOURCE)
+  const normalizedActiveTab = normalizeSourceKey(activeTab, DEFAULT_SOURCE)
   const [sortMode, setSortMode] = useState('default')
   const [results, setResults] = useState(createEmptyResults())
   const [totalCounts, setTotalCounts] = useState(createEmptyCounts())
   const [sourceMeta, setSourceMeta] = useState(createEmptySourceMeta())
   const [sourceModes, setSourceModes] = useState(createEmptySourceModes())
   const [sourceErrors, setSourceErrors] = useState({})
-  const [sourceSuppliers, setSourceSuppliers] = useState({})
+  const [sourcePriceStats, setSourcePriceStats] = useState(createEmptySourcePriceStats())
+  const [sourceSuppliers, setSourceSuppliers] = useState(createEmptySourceSuppliers())
   const [globalSuppliers, setGlobalSuppliers] = useState([])
   const [loading, setLoading] = useState(false)
   const [toast, setToast] = useState('')
 
   const applySearchPayload = (payload) => {
     if (!payload || !Array.isArray(payload.results)) {
-      return
+      return processSearchPayload(payload)
     }
 
     setGlobalSuppliers(payload.suppliers || [])
 
-    const nextResults = createEmptyResults()
-    const nextCounts = createEmptyCounts()
-    const nextSourceMeta = createEmptySourceMeta()
-    const nextSourceModes = createEmptySourceModes()
-    const nextErrors = {}
-    const nextSuppliers = {}
+    const processed = processSearchPayload(payload)
+    const {
+      nextResults,
+      nextCounts,
+      nextSourceMeta,
+      nextSourceModes,
+      nextSourcePriceStats,
+      nextErrors,
+      nextSuppliers,
+    } = processed
 
-    payload.results.forEach((entry) => {
-      const items = Array.isArray(entry.items) ? entry.items : []
-      const source = entry.source
-      if (!SOURCES.includes(source)) {
-        return
-      }
-
-      const rawMeta = entry?.meta && typeof entry.meta === 'object' ? entry.meta : {}
-      const metaSellers = Array.isArray(rawMeta.sellers)
-        ? rawMeta.sellers.filter((value) => typeof value === 'string' && value.trim())
-        : []
-      const metaTotal = Number.isFinite(rawMeta.total_found) ? rawMeta.total_found : null
-      const metaSellersFound = Number.isFinite(rawMeta.sellers_unique_count)
-        ? rawMeta.sellers_unique_count
-        : metaSellers.length
-      const metaSellersKnownItems = Number.isFinite(rawMeta.sellers_known_items)
-        ? rawMeta.sellers_known_items
-        : metaSellers.length
-
-      nextResults[source] = items.slice(0, 10)
-      nextCounts[source] = metaTotal !== null && metaTotal >= 0 ? metaTotal : items.length
-      nextSourceMeta[source] = {
-        sellers: metaSellers,
-        sellersFound: metaSellersFound,
-        sellersKnownItems: metaSellersKnownItems,
-      }
-      nextSourceModes[source] = entry?.source_mode === 'client' ? 'client' : 'server'
-      nextSuppliers[source] = entry.suppliers || []
-      if (entry.error) {
-        nextErrors[source] = entry.error
-      }
-    })
+    console.log('payload.results', payload.results)
+    console.log('nextResults.satu', nextResults.satu)
+    console.log('nextCounts.satu', nextCounts.satu)
+    console.log('activeTab', activeTab)
+    console.log('normalizedActiveTab', normalizedActiveTab)
 
     setResults(nextResults)
     setTotalCounts(nextCounts)
     setSourceMeta(nextSourceMeta)
     setSourceModes(nextSourceModes)
+    setSourcePriceStats(nextSourcePriceStats)
     setSourceErrors(nextErrors)
     setSourceSuppliers(nextSuppliers)
-  }
 
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(LAST_ACTIVE_TAB_KEY, activeTab)
-    } catch {
-      // Ignore storage errors; the page remains usable without persistence.
-    }
-  }, [activeTab])
+    return processed
+  }
 
   useEffect(() => {
     const savedPayload = loadJson(LAST_SEARCH_PAYLOAD_KEY)
     if (savedPayload) {
-      applySearchPayload(savedPayload)
+      const processed = applySearchPayload(savedPayload)
+      const savedTab = readSessionString(LAST_ACTIVE_TAB_KEY, '')
+      const normalizedSavedTab = normalizeSourceKey(savedTab, DEFAULT_SOURCE)
+      const restoredTab = SOURCES.includes(normalizedSavedTab)
+        ? normalizedSavedTab
+        : firstSourceWithItems(processed.nextResults)
+      setActiveTab(restoredTab)
     }
+    didRestoreSession.current = true
   }, [])
+
+  useEffect(() => {
+    if (!didRestoreSession.current) {
+      return
+    }
+    if (!didSkipInitialActiveSave.current) {
+      didSkipInitialActiveSave.current = true
+      return
+    }
+
+    try {
+      sessionStorage.setItem(LAST_ACTIVE_TAB_KEY, normalizedActiveTab)
+    } catch {
+      // Ignore storage errors; the page remains usable without persistence.
+    }
+  }, [normalizedActiveTab])
 
   const handleSearch = async (event) => {
     event.preventDefault()
@@ -296,13 +393,14 @@ export default function SearchPage() {
 
     try {
       const payload = await api.search(prepared)
-      applySearchPayload(payload)
+      const processed = applySearchPayload(payload)
+      const nextActiveTab = firstSourceWithItems(processed.nextResults)
       setQuery(prepared)
-      setActiveTab('kaspi')
+      setActiveTab(nextActiveTab)
       try {
         sessionStorage.setItem(LAST_SEARCH_PAYLOAD_KEY, JSON.stringify(payload))
         sessionStorage.setItem(LAST_SEARCH_QUERY_KEY, prepared)
-        sessionStorage.setItem(LAST_ACTIVE_TAB_KEY, 'kaspi')
+        sessionStorage.setItem(LAST_ACTIVE_TAB_KEY, nextActiveTab)
       } catch {
         // Ignore storage errors; the page remains usable without persistence.
       }
@@ -313,7 +411,7 @@ export default function SearchPage() {
     }
   }
 
-  const activeItems = useMemo(() => results[activeTab] || [], [results, activeTab])
+  const activeItems = useMemo(() => results[normalizedActiveTab] || [], [results, normalizedActiveTab])
   const sortedActiveItems = useMemo(() => {
     if (sortMode === 'default') {
       return activeItems
@@ -345,7 +443,7 @@ export default function SearchPage() {
   }, [activeItems, sortMode])
 
   const activeAnalytics = useMemo(() => {
-    const activeMeta = sourceMeta[activeTab] || { sellers: [], sellersFound: 0, sellersKnownItems: 0 }
+    const activeMeta = sourceMeta[normalizedActiveTab] || { sellers: [], sellersFound: 0, sellersKnownItems: 0 }
     const knownSellers = activeItems
       .map((item) => (typeof item?.seller === 'string' ? item.seller.trim() : ''))
       .filter(Boolean)
@@ -358,13 +456,14 @@ export default function SearchPage() {
       : knownSellers.length
 
     return {
-      totalVariants: totalCounts[activeTab] ?? activeItems.length,
+      totalVariants: totalCounts[normalizedActiveTab] ?? activeItems.length,
       sellersFound,
       sellersKnownItems,
       sellers: sellersList,
       extremesByCurrency: buildExtremesByCurrency(activeItems),
+      priceStats: sourcePriceStats[normalizedActiveTab] || null,
     }
-  }, [activeItems, activeTab, totalCounts, sourceMeta])
+  }, [activeItems, normalizedActiveTab, totalCounts, sourceMeta, sourcePriceStats])
 
   const globalExtremesByCurrency = useMemo(() => {
     const allItems = Object.values(results).flat()
@@ -375,7 +474,7 @@ export default function SearchPage() {
     <main className="page">
       <section className="hero">
         <h1>Smart Catalog</h1>
-        <p>Поиск товаров сразу в Kaspi, Wildberries и Ozon</p>
+        <p>Поиск товаров сразу в Satu, Kaspi, Wildberries и Ozon</p>
         <SearchBar value={query} onChange={setQuery} onSubmit={handleSearch} loading={loading} />
       </section>
 
@@ -398,8 +497,8 @@ export default function SearchPage() {
         </div>
 
         <Tabs
-          activeTab={activeTab}
-          onTabChange={setActiveTab}
+          activeTab={normalizedActiveTab}
+          onTabChange={(tab) => setActiveTab(normalizeSourceKey(tab, DEFAULT_SOURCE))}
           totalCounts={totalCounts}
           sourceMeta={sourceMeta}
         />
@@ -412,7 +511,7 @@ export default function SearchPage() {
             </div>
             <div className="analytics-stat">
               <span>Источник данных</span>
-              <strong>{sourceModes[activeTab] === 'client' ? 'Браузер' : 'Сервер'}</strong>
+              <strong>{sourceModes[normalizedActiveTab] === 'client' ? 'Браузер' : 'Сервер'}</strong>
             </div>
             <div className="analytics-stat">
               <span>Уникальных продавцов</span>
@@ -422,6 +521,14 @@ export default function SearchPage() {
               <span>Карточек с продавцом</span>
               <strong>{activeAnalytics.sellersKnownItems}</strong>
             </div>
+            {activeAnalytics.priceStats && (
+              <div className="analytics-stat">
+                <span>Средняя цена</span>
+                <strong>
+                  {formatMoneyValue(activeAnalytics.priceStats.average_price, activeAnalytics.priceStats.currency) || 'Нет данных'}
+                </strong>
+              </div>
+            )}
           </div>
 
           {activeAnalytics.sellers.length > 0 ? (
@@ -482,19 +589,19 @@ export default function SearchPage() {
           </div>
         </div>
 
-        {sourceSuppliers[activeTab]?.length > 0 && (
+        {sourceSuppliers[normalizedActiveTab]?.length > 0 && (
           <div className="suppliers-panel">
             <div className="section-heading">
               <div>
                 <p className="eyebrow">Suppliers</p>
                 <h3>Поставщики</h3>
               </div>
-              <span>{sourceSuppliers[activeTab].length} найдено</span>
+              <span>{sourceSuppliers[normalizedActiveTab].length} найдено</span>
             </div>
 
             <div className="suppliers-list">
-              {sourceSuppliers[activeTab].slice(0, 10).map((supplier) => (
-                <div className="supplier-card" key={`${activeTab}-${supplier.name}`}>
+              {sourceSuppliers[normalizedActiveTab].slice(0, 10).map((supplier) => (
+                <div className="supplier-card" key={`${normalizedActiveTab}-${supplier.name}`}>
                   <div>
                     <strong>{supplier.name}</strong>
                     <span>{supplier.products_count} товаров</span>
@@ -520,7 +627,9 @@ export default function SearchPage() {
           </div>
         )}
 
-        {sourceErrors[activeTab] && <p className="source-error">Источник вернул ошибку: {sourceErrors[activeTab]}</p>}
+        {sourceErrors[normalizedActiveTab] && (
+          <p className="source-error">Источник вернул ошибку: {sourceErrors[normalizedActiveTab]}</p>
+        )}
 
         {loading && <Loader text="Собираем данные с маркетплейсов..." />}
 

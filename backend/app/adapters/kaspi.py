@@ -5,7 +5,7 @@ import logging
 import re
 from urllib.parse import quote_plus, urljoin
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 
 from app.adapters.base import MarketplaceAdapter
 from app.adapters.common import (
@@ -488,7 +488,6 @@ class KaspiAdapter(MarketplaceAdapter):
                 },
             )
 
-            link_text = clean_text(link.get_text(" ", strip=True))
             title_candidate = self._extract_card_title(link, container)
             if title_candidate:
                 existing_title = entry["title"] if isinstance(entry["title"], str) else None
@@ -499,20 +498,17 @@ class KaspiAdapter(MarketplaceAdapter):
                 elif len(title_candidate) > len(existing_title):
                     entry["title"] = title_candidate
 
-            if not entry["reviews_count"]:
-                entry["reviews_count"] = extract_reviews_count(link_text)
-
             blob_text = clean_text(container.get_text(" ", strip=True))
             if blob_text:
                 casted_blobs: list[str] = entry["blob_texts"]  # type: ignore[assignment]
                 casted_blobs.append(blob_text)
 
             if not entry["price"]:
-                entry["price"] = self._extract_price(container, blob_text)
+                entry["price"] = self._extract_card_price(container)
             if not entry["rating"]:
-                entry["rating"] = self._extract_rating(container, blob_text)
+                entry["rating"] = self._extract_card_rating(container)
             if not entry["reviews_count"]:
-                entry["reviews_count"] = self._extract_reviews(container, blob_text)
+                entry["reviews_count"] = self._extract_card_reviews_count(container)
             if not entry["image_url"]:
                 entry["image_url"] = self._extract_image(container, link=link)
 
@@ -535,12 +531,6 @@ class KaspiAdapter(MarketplaceAdapter):
                 continue
 
             price = entry["price"] if isinstance(entry["price"], str) else None
-            if not price:
-                for blob in blob_texts:
-                    parsed_price = format_price(blob)
-                    if parsed_price:
-                        price = parsed_price
-                        break
             if not price:
                 skipped_missing_price += 1
                 continue
@@ -584,6 +574,71 @@ class KaspiAdapter(MarketplaceAdapter):
 
         return items
 
+    def _extract_card_price(self, container: BeautifulSoup | Tag | None) -> str | None:
+        if not container:
+            return None
+
+        for node in container.select(
+            ".item-card__prices-price, "
+            ".item-card__price, "
+            "[class*='prices-price'], "
+            ".product-card-info__product-price, "
+            ".product-price__final-price, "
+            ".product-price__final-price-discounted, "
+            ".product-price"
+        ):
+            class_blob = " ".join(node.get("class") or []).lower()
+            parent_class_blob = " ".join(node.parent.get("class") or []).lower() if isinstance(node.parent, Tag) else ""
+            if "monthly-payment" in class_blob or "monthly-payment" in parent_class_blob:
+                continue
+
+            text = clean_text(node.get_text(" ", strip=True))
+            match = re.search(r"(\d[\d\s\xa0]{2,})", text)
+            if not match:
+                continue
+
+            digits = re.sub(r"\D", "", match.group(1))
+            if len(digits) < 3:
+                continue
+
+            return f"{int(digits):,}".replace(",", " ") + " ₸"
+
+        return None
+
+    def _extract_card_reviews_count(self, container: BeautifulSoup | Tag | None) -> str | None:
+        if not container:
+            return None
+
+        for node in container.select(
+            ".item-card__rating a[href*='tab=review'], "
+            "a[href*='tab=review']"
+        ):
+            text = clean_text(node.get_text(" ", strip=True))
+            match = re.search(r"(\d[\d\s\xa0]*)\s*отзыв(?:а|ов)?\b", text, flags=re.IGNORECASE)
+            if match:
+                return re.sub(r"\D", "", match.group(1))
+
+        return None
+
+    def _extract_card_rating(self, container: BeautifulSoup | Tag | None) -> str | None:
+        if not container:
+            return None
+
+        for node in container.select(".item-card__rating span.rating, span.rating"):
+            for class_name in node.get("class") or []:
+                match = re.fullmatch(r"_(\d{2})", str(class_name))
+                if not match:
+                    continue
+
+                raw_value = int(match.group(1))
+                if raw_value < 10 or raw_value > 50:
+                    continue
+
+                value = raw_value / 10
+                return str(int(value)) if value.is_integer() else str(value)
+
+        return None
+
     def _parse_detail(self, html: str, full_url: str) -> ProductDetail:
         soup = BeautifulSoup(html, "html.parser")
         jsonld = extract_product_jsonld(soup)
@@ -605,31 +660,9 @@ class KaspiAdapter(MarketplaceAdapter):
         )
         image_url = normalize_link(self.base_url, image_url) if image_url else None
 
-        price_raw = choose_first_non_empty(
-            [
-                jsonld.get("price"),
-                first_text(
-                    soup,
-                    [
-                        "[data-testid*='price']",
-                        "[class*='price']",
-                        "meta[property='product:price:amount']",
-                    ],
-                ),
-                first_attr(soup, ["meta[property='product:price:amount']"], "content"),
-            ]
-        )
-        price = format_price(price_raw) or clean_text(price_raw)
-
-        rating = format_rating(jsonld.get("rating")) or self._extract_rating(
-            soup,
-            clean_text(soup.get_text(" ", strip=True)),
-        )
-
-        reviews_count = extract_reviews_count(jsonld.get("reviews_count")) or self._extract_reviews(
-            soup,
-            clean_text(soup.get_text(" ", strip=True)),
-        )
+        price = self._extract_detail_price(soup)
+        rating = self._extract_detail_rating(soup)
+        reviews_count = self._extract_detail_reviews_count(soup)
 
         description = choose_first_non_empty(
             [
@@ -667,6 +700,14 @@ class KaspiAdapter(MarketplaceAdapter):
             logger.warning("Kaspi detail: price not found for %s", full_url)
         if not rating:
             logger.info("Kaspi detail: rating not found for %s", full_url)
+        logger.info(
+            "Kaspi detail parsed title=%r price=%r rating=%r reviews_count=%r url=%s",
+            title,
+            price,
+            rating,
+            reviews_count,
+            full_url,
+        )
 
         return ProductDetail(
             source=self.source,
@@ -680,6 +721,108 @@ class KaspiAdapter(MarketplaceAdapter):
             characteristics=characteristics,
             raw_sections=raw_sections,
         )
+
+    def _extract_detail_price(self, soup: BeautifulSoup) -> str | None:
+        for node in soup.select(
+            ".item__price-once, "
+            ".item__price, "
+            ".item__price-main, "
+            "[class*='item__price']"
+        ):
+            text = clean_text(node.get_text(" ", strip=True))
+            lowered = text.lower()
+            if not any(token in lowered for token in ("₸", "тг")):
+                continue
+            if any(token in lowered for token in ("рассроч", "мес", "x", "×")):
+                continue
+
+            match = re.search(r"(\d[\d\s\xa0]{2,})", text)
+            if not match:
+                continue
+
+            value = int(re.sub(r"\D", "", match.group(1)))
+            if value < 1_000 or value > 100_000_000:
+                continue
+
+            return f"{value:,}".replace(",", " ") + " ₸"
+
+        return None
+
+    def _extract_detail_reviews_count(self, soup: BeautifulSoup) -> str | None:
+        text = self._detail_text_before_sections(soup)
+        for match in re.finditer(r"(\d[\d\s\xa0]*)\s*отзыв(?:а|ов)?\b", text, flags=re.IGNORECASE):
+            value = int(re.sub(r"\D", "", match.group(1)))
+            if value <= 100_000:
+                return str(value)
+
+        return None
+
+    def _extract_detail_rating(self, soup: BeautifulSoup) -> str | None:
+        for node in soup.select("span.rating"):
+            if not self._is_before_detail_sections(soup, node):
+                continue
+            if node.find_parent("table", class_=re.compile(r"sellers-table", re.IGNORECASE)):
+                continue
+
+            parsed = self._rating_from_class_names(node.get("class"))
+            if parsed:
+                return parsed
+
+        return None
+
+    def _detail_text_before_sections(self, soup: BeautifulSoup) -> str:
+        markers = ("продавцы", "характеристики", "описание")
+        chunks: list[str] = []
+
+        for raw_text in soup.find_all(string=True):
+            if raw_text.parent and raw_text.parent.name in {"script", "style", "noscript"}:
+                continue
+            text = clean_text(str(raw_text))
+            if not text:
+                continue
+            lowered = text.lower()
+            marker_positions = [lowered.find(marker) for marker in markers if lowered.find(marker) >= 0]
+
+            if marker_positions:
+                cut_at = min(marker_positions)
+                if cut_at > 0:
+                    chunks.append(text[:cut_at])
+                break
+
+            chunks.append(text)
+
+        return clean_text(" ".join(chunks))
+
+    def _is_before_detail_sections(self, soup: BeautifulSoup, node: Tag) -> bool:
+        markers = ("продавцы", "характеристики", "описание")
+
+        for descendant in soup.descendants:
+            if descendant is node:
+                return True
+            if isinstance(descendant, NavigableString):
+                if descendant.parent and descendant.parent.name in {"script", "style", "noscript"}:
+                    continue
+                text = clean_text(str(descendant)).lower()
+                if any(marker in text for marker in markers):
+                    return False
+
+        return False
+
+    @staticmethod
+    def _rating_from_class_names(class_names: object) -> str | None:
+        for class_name in class_names or []:
+            match = re.fullmatch(r"_(\d{2})", str(class_name))
+            if not match:
+                continue
+
+            raw_value = int(match.group(1))
+            if raw_value < 0 or raw_value > 50:
+                continue
+
+            value = raw_value / 10
+            return str(int(value)) if value.is_integer() else str(value)
+
+        return None
 
     def _extract_price(self, container: BeautifulSoup | None, blob_text: str) -> str | None:
         candidates: list[str | None] = []

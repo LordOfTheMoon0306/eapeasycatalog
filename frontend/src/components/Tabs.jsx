@@ -1,19 +1,21 @@
+import { SOURCES } from '../constants/sources'
+
 const LABELS = {
   kaspi: 'Kaspi',
   wildberries: 'Wildberries',
   ozon: 'Ozon',
-  satu: 'Satu'
+  satu: 'Satu',
 }
 
 export default function Tabs({ activeTab, onTabChange, totalCounts = {}, sourceMeta = {} }) {
-  const tabs = ['kaspi', 'wildberries', 'ozon','satu']
+  const tabs = SOURCES
 
   return (
     <div className="tabs" role="tablist">
       {tabs.map((tab) => {
         const count = totalCounts[tab] ?? 0
         const sellersCount = sourceMeta[tab]?.sellersFound ?? sourceMeta[tab]?.sellers?.length ?? 0
-        const isActive = activeTab === tab
+        const isActive = String(activeTab || '').toLowerCase() === tab
 
         return (
           <button

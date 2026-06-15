@@ -11,8 +11,6 @@ RUN apt-get update \
         git \
         ca-certificates \
         chromium \
-        xvfb \
-        dbus-x11 \
         fonts-liberation \
         libnss3 \
         libatk-bridge2.0-0 \
@@ -43,7 +41,4 @@ COPY backend/app /app/app
 
 EXPOSE 8000
 
-# nodriver запускает Chromium с headless=False (см. backend/app/adapters/fallback_nodriver.py),
-# поэтому оборачиваем uvicorn в xvfb-run, чтобы был виртуальный X-дисплей.
-CMD ["xvfb-run", "-a", "--server-args=-screen 0 1440x2200x24", \
-     "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

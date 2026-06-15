@@ -19,7 +19,8 @@ async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> boo
     """
     api_key = settings.capmonster_api_key.strip()
     if not api_key:
-        logger.debug("CapMonster API key not configured – skipping captcha solve")
+        logger.debug(
+            "CapMonster API key not configured – skipping captcha solve")
         return False
 
     try:
@@ -92,7 +93,7 @@ async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> boo
                 "  return match ? 'datadome=' + match[1] + ';' : '';"
                 "})()"
             ))
-            
+
             task = {
                 "type": "CustomTask",
                 "class": "DataDome",
@@ -115,7 +116,8 @@ async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> boo
             inject_mode = "turnstile"
 
         if not task:
-            logger.info("CapMonster: no captcha widget detected on page %s", url)
+            logger.info(
+                "CapMonster: no captcha widget detected on page %s", url)
             return False
 
         logger.info("CapMonster: submitting %s task for %s", task["type"], url)
@@ -127,7 +129,8 @@ async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> boo
             )
             data = res.json()
             if data.get("errorId", 0) != 0:
-                logger.warning("CapMonster createTask error: %s", data.get("errorDescription"))
+                logger.warning("CapMonster createTask error: %s",
+                               data.get("errorDescription"))
                 return False
 
             task_id = data.get("taskId")
@@ -151,7 +154,8 @@ async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> boo
                         or solution.get("answer")
                     )
                     if not token and inject_mode != "datadome":
-                        logger.warning("CapMonster: ready but no token in solution: %s", solution)
+                        logger.warning(
+                            "CapMonster: ready but no token in solution: %s", solution)
                         return False
 
                     if inject_mode == "recaptcha":
@@ -184,12 +188,13 @@ async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> boo
                             if "datadome" in cookies:
                                 datadome_resp_cookie = cookies["datadome"]
                                 break
-                        
+
                         if not datadome_resp_cookie and token:
-                             datadome_resp_cookie = token  # fallback 
+                            datadome_resp_cookie = token  # fallback
 
                         if not datadome_resp_cookie:
-                            logger.warning("CapMonster: no datadome cookie in solution: %s", solution)
+                            logger.warning(
+                                "CapMonster: no datadome cookie in solution: %s", solution)
                             return False
 
                         await page.evaluate(
@@ -217,10 +222,12 @@ async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> boo
                     return True
 
                 if poll.get("status") != "processing":
-                    logger.warning("CapMonster unexpected poll status: %s", poll)
+                    logger.warning(
+                        "CapMonster unexpected poll status: %s", poll)
                     return False
 
-            logger.warning("CapMonster: timed out waiting for solution for %s", url)
+            logger.warning(
+                "CapMonster: timed out waiting for solution for %s", url)
             return False
 
     except Exception as exc:  # noqa: BLE001
@@ -273,60 +280,60 @@ async def render_page(
     browser = await uc.start(config=config, user_data_dir=False, headless=True, proxy=proxy_url)
     try:
         page = await browser.get(url)
+        logger.warning("Nodriver opened url=%s", url)
 
         capmonster_attempted = False
         captcha_detected = False
-        if wait_selectors:
-            interval = 0.5
-            max_iter = int(timeout_ms / (interval * 1000))
-            for _ in range(max_iter):
-                # Check for anti-bot / captcha page
-                try:
-                    page_text: str = await page.evaluate("document.body.innerText || ''")
-                    lowered = page_text.lower() if page_text else ""
-                    is_blocked = any(phrase in lowered for phrase in ANTIBOT_PHRASES)
-                    if is_blocked and not capmonster_attempted:
-                        capmonster_attempted = True
-                        logger.info("Anti-bot page detected on %s – attempting CapMonster solve", url)
-                        solved = await _solve_capmonster(page, url, proxy_url=proxy_url)
-                        if solved:
-                            # Reload or wait for redirect after token injection
-                            await asyncio.sleep(3)
-                            await page.reload()
-                            await asyncio.sleep(2)
-                        else:
-                            # Slider / unknown captcha — CapMonster can't handle it
-                            captcha_detected = True
-                            logger.warning(
-                                "Anti-bot challenge not solvable by CapMonster (likely slider captcha) on %s", url
-                            )
-                            raise RuntimeError(f"Unsolvable anti-bot challenge detected on {url}")
-                except RuntimeError:
-                    raise
-                except Exception:  # noqa: BLE001
-                    pass
-
-                found = False
-                for selector in wait_selectors:
-                    try:
-                        node = await page.evaluate(f'document.querySelector("{selector}")')
-                        if node:
-                            found = True
-                            break
-                    except Exception:  # noqa: BLE001
-                        pass
-                if found:
-                    break
-                await page.sleep(interval)
-        else:
-            await page.sleep(2)
-
-        if scroll:
-            for _ in range(5):
-                await page.evaluate("window.scrollBy(0, 1600);")
-                await page.sleep(0.3)
+        await page.sleep(0.3)
 
         content = await page.get_content()
+
+        try:
+            try:
+                final_url = await page.evaluate("window.location.href")
+            except Exception:  # noqa: BLE001
+                final_url = url
+
+            try:
+                body_text = await page.evaluate("document.body.innerText || ''")
+            except Exception:  # noqa: BLE001
+                body_text = ""
+
+            lowered = ((body_text or "") + " " + (content or "")).lower()
+            antibot_detected = any(
+                phrase in lowered
+                for phrase in [
+                    "captcha",
+                    "robot",
+                    "робот",
+                    "access denied",
+                    "verify",
+                    "checking your browser",
+                    "доступ ограничен",
+                    "подтвердите",
+                    "cloudflare",
+                    "защит",
+                ]
+            )
+
+            logger.warning(
+                "Render page diagnostics url=%s final_url=%s html_len=%s body_len=%s "
+                "antibot=%s body_sample=%r html_sample=%r",
+                url,
+                final_url,
+                len(content or ""),
+                len(body_text or ""),
+                antibot_detected,
+                (body_text or "")[:1000],
+                (content or "")[:1000],
+            )
+        except Exception as diagnostics_exc:  # noqa: BLE001
+            logger.warning(
+                "Render page diagnostics failed url=%s err=%s",
+                url,
+                diagnostics_exc,
+            )
+
         return content
     except Exception as exc:
         logger.warning("nodriver render failed: url=%s err=%s", url, exc)

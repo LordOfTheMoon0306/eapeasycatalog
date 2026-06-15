@@ -1,0 +1,10 @@
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+wrapper-tls-requests @ git+https://github.com/thewebscraping/tls-requests.git@4500246e941c5ca0fa0f01f8610fa5727ef71ef7
+beautifulsoup4==4.13.4
+pydantic==2.11.7
+pydantic-settings==2.10.1
+python-multipart==0.0.20
+nodriver==0.48.1
+apify-client
+httpx

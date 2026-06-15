@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+backend/.env
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Playwright
+playwright-report/
+
+# Logs
+*.log
+backend-run*.log
+*.stdout.log
+*.stderr.log
+
+# Environment
+*.env
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Coverage / testing
+coverage/
+playwright-report/
+test-results/

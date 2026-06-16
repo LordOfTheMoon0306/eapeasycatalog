@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 
 import httpx
@@ -10,6 +11,17 @@ from nodriver import Config
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _supports_parameter(obj: object, name: str) -> bool:
+    try:
+        parameters = inspect.signature(obj).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in parameters or any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
 
 
 async def _solve_capmonster(page, url: str, proxy_url: str | None = None) -> bool:  # noqa: ANN001
@@ -272,13 +284,45 @@ async def render_page(
     if user_agent:
         browser_args.append(f"--user-agent={user_agent}")
 
-    config = Config(
-        headless=True,
-        browser_args=browser_args,
+    config_kwargs = {
+        "headless": True,
+        "browser_args": browser_args,
+    }
+    if _supports_parameter(Config, "no_sandbox"):
+        config_kwargs["no_sandbox"] = True
+    config = Config(**config_kwargs)
+
+    logger.warning(
+        "Starting nodriver browser headless=%s no_sandbox=%s url=%s",
+        True,
+        True,
+        url,
     )
 
-    browser = await uc.start(config=config, user_data_dir=False, headless=True, proxy=proxy_url)
+    browser = None
     try:
+        try:
+            browser = await uc.start(
+                config=config,
+                user_data_dir=False,
+                headless=True,
+                no_sandbox=True,
+                proxy=proxy_url,
+            )
+        except TypeError as exc:
+            if "no_sandbox" not in str(exc):
+                raise
+            logger.warning(
+                "nodriver uc.start no_sandbox parameter unsupported; retrying with Config/browser args url=%s",
+                url,
+            )
+            browser = await uc.start(
+                config=config,
+                user_data_dir=False,
+                headless=True,
+                proxy=proxy_url,
+            )
+
         page = await browser.get(url)
         logger.warning("Nodriver opened url=%s", url)
 
@@ -318,7 +362,7 @@ async def render_page(
 
             logger.warning(
                 "Render page diagnostics url=%s final_url=%s html_len=%s body_len=%s "
-                "antibot=%s body_sample=%r html_sample=%r",
+                "antibot_detected=%s body_sample=%r html_sample=%r",
                 url,
                 final_url,
                 len(content or ""),
@@ -336,7 +380,9 @@ async def render_page(
 
         return content
     except Exception as exc:
+        logger.exception("Nodriver failed to start or connect browser url=%s", url)
         logger.warning("nodriver render failed: url=%s err=%s", url, exc)
         raise
     finally:
-        browser.stop()
+        if browser is not None:
+            browser.stop()

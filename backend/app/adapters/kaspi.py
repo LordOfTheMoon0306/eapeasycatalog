@@ -26,7 +26,7 @@ from app.adapters.common import (
     looks_like_product_title,
     normalize_link,
 )
-from app.adapters.fallback_nodriver import render_page
+from app.adapters.fallback_playwright import render_page
 from app.core.config import settings
 from app.core.http_client import RequestClient
 from app.schemas.models import ProductCard, ProductDetail, SourceName
@@ -371,6 +371,8 @@ class KaspiAdapter(MarketplaceAdapter):
             return cards
         except Exception as exc:  # noqa: BLE001
             logger.warning("Kaspi render/search failed: err_type=%s err=%r", type(exc).__name__, exc, exc_info=True,)
+            if str(exc) == "Marketplace blocked automated access":
+                raise RuntimeError("Marketplace blocked automated access") from exc
             if self.last_block_reason:
                 raise RuntimeError(f"Kaspi blocked by anti-bot challenge: {self.last_block_reason}") from exc
             raise RuntimeError("Kaspi parser returned no products") from exc
@@ -455,6 +457,8 @@ class KaspiAdapter(MarketplaceAdapter):
             if detail and detail.title:
                 return detail
         except Exception as exc:  # noqa: BLE001
+            if str(exc) == "Marketplace blocked automated access":
+                raise RuntimeError("Marketplace blocked automated access") from exc
             logger.warning("Kaspi HTTP request failed: %s", exc)
         raise RuntimeError("Failed to parse Kaspi product details")
 

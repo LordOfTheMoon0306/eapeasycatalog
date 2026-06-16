@@ -25,7 +25,7 @@ from app.adapters.common import (
     looks_like_product_title,
     normalize_link,
 )
-from app.adapters.fallback_nodriver import render_page
+from app.adapters.fallback_playwright import render_page
 from app.core.config import settings
 from app.core.http_client import RequestClient
 from app.schemas.models import ProductCard, ProductDetail, SourceName
@@ -129,6 +129,8 @@ class OzonAdapter(MarketplaceAdapter):
                 user_agent=user_agent,
             )
         except RuntimeError as exc:
+            if str(exc) == "Marketplace blocked automated access":
+                raise
             logger.warning("Ozon Selenium search exhausted, trying HTTP fallback: %s", exc)
             cards = []
 
@@ -326,6 +328,8 @@ class OzonAdapter(MarketplaceAdapter):
                     return cards
                 logger.warning("Ozon parse produced 0 cards, attempt=%s url=%s", attempt, url)
             except Exception as exc:  # noqa: BLE001
+                if str(exc) == "Marketplace blocked automated access":
+                    raise RuntimeError("Marketplace blocked automated access") from exc
                 self.client.proxy_manager.mark_dead(proxy_url, reason=f"playwright search failed: {exc}", url=url)
                 logger.warning("Ozon Selenium search failed, attempt=%s proxy=%s err=%s", attempt, proxy_url, exc)
 
@@ -360,6 +364,8 @@ class OzonAdapter(MarketplaceAdapter):
                     return detail
                 logger.warning("Ozon detail parsed without title, attempt=%s url=%s", attempt, full_url)
             except RuntimeError as exc:
+                if str(exc) == "Marketplace blocked automated access":
+                    raise
                 if str(exc) == OZON_DETAIL_CHALLENGE_MESSAGE:
                     self.client.proxy_manager.mark_dead(
                         proxy_url,
@@ -374,6 +380,8 @@ class OzonAdapter(MarketplaceAdapter):
                 )
                 logger.warning("Ozon Selenium detail failed, attempt=%s proxy=%s err=%s", attempt, proxy_url, exc)
             except Exception as exc:  # noqa: BLE001
+                if str(exc) == "Marketplace blocked automated access":
+                    raise RuntimeError("Marketplace blocked automated access") from exc
                 self.client.proxy_manager.mark_dead(
                     proxy_url,
                     reason=f"playwright detail failed: {exc}",

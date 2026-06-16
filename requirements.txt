@@ -6,5 +6,6 @@ pydantic==2.11.7
 pydantic-settings==2.10.1
 python-multipart==0.0.20
 nodriver==0.48.1
+playwright==1.49.1
 apify-client
 httpx

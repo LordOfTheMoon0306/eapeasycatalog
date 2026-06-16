@@ -25,7 +25,7 @@ from app.adapters.common import (
     looks_like_product_title,
     normalize_link,
 )
-from app.adapters.fallback_nodriver import render_page
+from app.adapters.fallback_playwright import render_page
 from app.core.config import settings
 from app.core.http_client import RequestClient
 from app.schemas.models import ProductCard, ProductDetail, SourceName
@@ -275,6 +275,8 @@ class WildberriesAdapter(MarketplaceAdapter):
                     return cards
                 logger.warning("Wildberries parse produced 0 cards, attempt=%s url=%s", attempt, url)
             except Exception as exc:  # noqa: BLE001
+                if str(exc) == "Marketplace blocked automated access":
+                    raise RuntimeError("Marketplace blocked automated access") from exc
                 self.client.proxy_manager.mark_dead(proxy_url, reason=f"playwright search failed: {exc}", url=url)
                 logger.warning("Wildberries Selenium search failed, attempt=%s proxy=%s err=%s", attempt, proxy_url, exc)
 
@@ -320,6 +322,8 @@ class WildberriesAdapter(MarketplaceAdapter):
                     return detail
                 logger.warning("Wildberries detail parsed without title, attempt=%s url=%s", attempt, full_url)
             except Exception as exc:  # noqa: BLE001
+                if str(exc) == "Marketplace blocked automated access":
+                    raise RuntimeError("Marketplace blocked automated access") from exc
                 self.client.proxy_manager.mark_dead(
                     proxy_url,
                     reason=f"playwright detail failed: {exc}",

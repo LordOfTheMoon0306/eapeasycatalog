@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
 
 import httpx
 import nodriver as uc
@@ -12,6 +13,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 _RENDER_BROWSER_SEMAPHORE = asyncio.Semaphore(1)
+RENDER = os.getenv("RENDER") == "true"
+BROWSER_HEADLESS = os.getenv("BROWSER_HEADLESS", "true").lower() == "true"
 
 
 def _supports_parameter(obj: object, name: str) -> bool:
@@ -292,8 +295,8 @@ async def _render_page_with_browser(
     device_profile: str = "desktop",
     user_agent: str | None = None,
 ) -> str:
+    headless = False if RENDER else BROWSER_HEADLESS
     browser_args = [
-        "--headless=new",
         "--disable-blink-features=AutomationControlled",
         "--disable-blink-features",
         "--disable-web-security",
@@ -305,11 +308,13 @@ async def _render_page_with_browser(
         "--window-size=1440,2200",
         "--window-position=0,0",
     ]
+    if headless:
+        browser_args.insert(0, "--headless=new")
     if user_agent:
         browser_args.append(f"--user-agent={user_agent}")
 
     config_kwargs = {
-        "headless": True,
+        "headless": headless,
         "browser_args": browser_args,
     }
     if _supports_parameter(Config, "no_sandbox"):
@@ -317,9 +322,9 @@ async def _render_page_with_browser(
     config = Config(**config_kwargs)
 
     logger.warning(
-        "Starting nodriver browser headless=%s no_sandbox=%s url=%s",
-        True,
-        True,
+        "Starting nodriver browser render=%s headless=%s no_sandbox=True url=%s",
+        RENDER,
+        headless,
         url,
     )
 
@@ -329,7 +334,7 @@ async def _render_page_with_browser(
             browser = await uc.start(
                 config=config,
                 user_data_dir=False,
-                headless=True,
+                headless=headless,
                 no_sandbox=True,
                 proxy=proxy_url,
             )
@@ -343,7 +348,7 @@ async def _render_page_with_browser(
             browser = await uc.start(
                 config=config,
                 user_data_dir=False,
-                headless=True,
+                headless=headless,
                 proxy=proxy_url,
             )
 

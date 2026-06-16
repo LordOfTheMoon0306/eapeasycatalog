@@ -11,6 +11,7 @@ from nodriver import Config
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+_RENDER_BROWSER_SEMAPHORE = asyncio.Semaphore(1)
 
 
 def _supports_parameter(obj: object, name: str) -> bool:
@@ -268,6 +269,29 @@ async def render_page(
     device_profile: str = "desktop",
     user_agent: str | None = None,
 ) -> str:
+    logger.warning("Waiting for render browser slot url=%s", url)
+    async with _RENDER_BROWSER_SEMAPHORE:
+        logger.warning("Acquired render browser slot url=%s", url)
+        return await _render_page_with_browser(
+            url=url,
+            timeout_ms=timeout_ms,
+            wait_selectors=wait_selectors,
+            proxy_url=proxy_url,
+            scroll=scroll,
+            device_profile=device_profile,
+            user_agent=user_agent,
+        )
+
+
+async def _render_page_with_browser(
+    url: str,
+    timeout_ms: int = 20000,
+    wait_selectors: list[str] | None = None,
+    proxy_url: str | None = None,
+    scroll: bool = True,
+    device_profile: str = "desktop",
+    user_agent: str | None = None,
+) -> str:
     browser_args = [
         "--headless=new",
         "--disable-blink-features=AutomationControlled",
@@ -385,4 +409,9 @@ async def render_page(
         raise
     finally:
         if browser is not None:
-            browser.stop()
+            try:
+                stop_result = browser.stop()
+                if inspect.isawaitable(stop_result):
+                    await stop_result
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to stop nodriver browser url=%s", url)
